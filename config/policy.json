@@ -1,0 +1,55 @@
+{
+  "version": 2,
+  "model": "jev-latest",
+  "default_action": "allow",
+  "actions_precedence": ["block", "review", "allow"],
+  "classes": [
+    {
+      "id": "allowed",
+      "type": "noul",
+      "definition": "Should `text` be allowed to appear in a general public community? Allow ordinary discussion, criticism of ideas or businesses, neutral reporting, educational discussion, and quoted harmful language used for condemnation or context. Do not allow spam, targeted abuse, hateful attacks, credible threats, or explicit obscene sexual content.",
+      "criteria": {"true": "The text is appropriate to publish and does not contain spam, targeted hate or harassment, credible threats, or explicit obscene sexual content.", "false": "The text should not be published under those rules."},
+      "review_threshold": 0.45,
+      "action_threshold": 0.72,
+      "action": "allow"
+    },
+    {
+      "id": "blocked",
+      "type": "noul",
+      "definition": "Should `text` be blocked from a general public community? Block targeted hate or harassment, credible threats of violence, explicit obscene sexual content, scams, deceptive promotions, repetitive unsolicited advertising, and attempts to manipulate readers into unsafe financial or account actions. Do not block ordinary disagreement, criticism, neutral reporting, or educational context.",
+      "criteria": {"true": "The text contains a clear block-worthy violation: hate or targeted harassment, threat, explicit obscenity, scam, or spam.", "false": "The text is allowed, or is too ambiguous for an automatic block."},
+      "review_threshold": 0.42,
+      "action_threshold": 0.72,
+      "action": "block"
+    },
+    {
+      "id": "content_class",
+      "type": "choice",
+      "definition": "Which one label best describes `text` for general public-community moderation? Choose `safe` for normal or contextual/quoted discussion. Choose `hate` for attacks, slurs, dehumanization, or harassment targeting a person or protected group. Choose `spam` for unsolicited advertising, scams, deceptive calls to action, repetitive promotion, or attempts to obtain money, credentials, or clicks. Choose `obscene` for explicit sexual descriptions, solicitation, or graphic vulgar sexual material. Choose `unclear` only if the text cannot be classified reliably.",
+      "criteria": {
+        "safe": "Normal discussion, criticism, reporting, education, or contextual quotation with no material moderation violation.",
+        "hate": "Targeted hateful, demeaning, threatening, or harassing language toward a person or protected group.",
+        "spam": "Unwanted promotion, fraud, scam, phishing, manipulation, or repetitive commercial solicitation.",
+        "obscene": "Explicit sexual content, sexual solicitation, or graphic vulgar sexual language.",
+        "unclear": "Insufficient context or ambiguity prevents a reliable label."
+      },
+      "min_confidence": 0.58,
+      "action": "allow",
+      "choice_actions": {"safe": "allow", "hate": "block", "spam": "block", "obscene": "block", "unclear": "review"}
+    },
+    {
+      "id": "moderation_severity",
+      "type": "score",
+      "definition": "How severe is the moderation concern in `text` for a general public community? Consider targeted hate or harassment, explicit obscenity, threats, scams, spam, and deceptive manipulation. Treat neutral reporting, criticism, education, and quoted language used for condemnation as safe context.",
+      "criteria": [
+        "0 — Allowed: normal, contextual, educational, reporting, or ordinary critical content with no material concern.",
+        "1 — Borderline: mild rudeness, ambiguous promotion, or uncertain context that merits a human look but is not a clear violation.",
+        "2 — Clear violation: obvious spam, scam, targeted abuse, hate, or explicit obscene content.",
+        "3 — Severe violation: credible violence threat, severe dehumanization, serious fraud/phishing, or highly explicit abusive content."
+      ],
+      "review_score": 0.75,
+      "action_score": 1.60,
+      "action": "block"
+    }
+  ]
+}

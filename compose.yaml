@@ -1,0 +1,40 @@
+services:
+  moderation:
+    image: jev-moderation-service:local
+    build: .
+    env_file: .env
+    environment:
+      POLICY_PATH: /app/config/policy.json
+      AMQP_URL: ""
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./config:/app/config:ro
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+
+  moderation-worker:
+    image: jev-moderation-service:local
+    build: .
+    env_file: .env
+    environment:
+      HTTP_ENABLED: "false"
+      POLICY_PATH: /app/config/policy.json
+      WORKER_CONCURRENCY: 1
+    volumes:
+      - ./config:/app/config:ro
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+
+  rabbitmq:
+    image: rabbitmq:4-management-alpine
+    ports:
+      - "5672:5672"
+      - "15672:15672"
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
