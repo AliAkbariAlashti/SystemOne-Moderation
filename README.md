@@ -1,82 +1,127 @@
-# Jev moderation service
+# Jev Moderation
 
-A small, application-neutral text moderation service built in Go. It calls Jev once per item with every configured class, then applies your thresholds in code.
+A standalone text moderation service for applications that want to keep moderation
+out of their codebase. Send text over HTTP or RabbitMQ; receive an `allow`,
+`review`, or `block` decision with per-class reasons and the policy version.
 
-## Start it
+Built in Go, backed by Jev, and licensed under MIT. Jev is an external service:
+you need a Typesafe API key, and submitted text is sent to that provider.
+This project does not include a human review UI or store moderation decisions.
+
+## Quick start
 
 ```sh
 cp .env.example .env
-# Set TYPESAFE_API_KEY in .env
-docker compose up --build
+# Set TYPESAFE_API_KEY in .env.
+docker compose up --build -d
+curl http://localhost:8080/v1/moderate \
+  -H 'Content-Type: application/json' \
+  -d '{"id":"post-123","text":"Hello, community!"}'
 ```
 
-The HTTP API listens at `http://localhost:8080`; RabbitMQ's management UI is at `http://localhost:15672` (`guest` / `guest`).
+No question type is required. By default, all policy classes are evaluated in one
+provider call and the strongest configured action wins. Advanced callers may
+set `type` to `noul`, `choice`, or `score` to evaluate only that family.
 
-## Scale RabbitMQ moderation workers
+Compose binds HTTP and RabbitMQ to localhost and persists broker data in a named
+volume. Set `MODERATION_API_TOKEN` for shared deployments and send
+`Authorization: Bearer <token>` on `/v1/*`. Put remote access behind TLS and
+configure RabbitMQ users and permissions for your applications.
 
-`moderation-worker` is a dedicated AMQP-only service with no exposed HTTP port. RabbitMQ distributes messages among its replicas. Start five workers locally:
+For HTTP only, RabbitMQ is optional:
+
+```sh
+export TYPESAFE_API_KEY=your-key
+AMQP_URL= go run ./cmd/moderation-service
+```
+
+## Integrate from any language
+
+HTTP is useful for immediate decisions. RabbitMQ lets applications submit jobs
+and consume decisions independently. Neither requires a language-specific SDK.
+See [INTEGRATION.md](INTEGRATION.md) for payloads, a Python queue example,
+error handling, and recovery.
+
+| Endpoint | Purpose |
+| --- | --- |
+| `POST /v1/moderate` | Moderate one item; optional bearer authentication |
+| `GET /v1/policy` | Read the active policy; same authentication |
+| `GET /healthz` | Process liveness |
+| `GET /readyz` | Verify the current policy loads and validates |
+
+Readiness does not probe Jev or RabbitMQ. An upstream outage returns an error,
+never a fabricated `allow` decision. HTTP bodies are limited to 1 MiB and text
+to 100,000 bytes. Metadata is returned unchanged but is not sent to Jev.
+
+## Policy
+
+Edit [`config/policy.json`](config/policy.json). It is read and validated for each
+item. Replace it atomically and increment `version` when changing behavior.
+Invalid configuration makes requests fail until corrected.
+
+| Class type | Meaning | Controls |
+| --- | --- | --- |
+| `noul` | Independent probability | `review_threshold`, `action_threshold`, `action` |
+| `choice` | Mutually exclusive category | Named `criteria`, `choice_actions`, optional `min_confidence` |
+| `score` | Ordered severity | Ordered `criteria`, `review_score`, `action_score`, `action` |
+
+Precedence must list `block`, `review`, and `allow` exactly once, highest first.
+Low-confidence Choice answers go to review before category actions are applied.
+Missing or invalid provider answers fail the request rather than defaulting to zero.
+The bundled policy is an example: evaluate it on your community's languages and
+content before relying on automatic decisions. Running all classes may change
+latency, cost, and decisions relative to the earlier type-specific API.
+
+## Queue reliability and scaling
+
+Workers use prefetch 1, mandatory result routing, publisher confirms, and manual
+acknowledgements. Temporary provider failures get up to four attempts with
+1/2/4-second delays. Invalid or exhausted jobs go to `moderation.requests.dead`;
+unroutable replies also preserve the original job there. Queue names follow
+`AMQP_INPUT_QUEUE`, including its `.dead` suffix.
+
+The original job is acknowledged only after its result or dead-letter copy is
+confirmed. Delivery is **at least once**: deduplicate decisions in your app.
+Retries reset after a worker crash, and a redelivery can call Jev again.
+Monitor the dead queue and pending application records; failed jobs do not
+produce normal decision replies.
 
 ```sh
 docker compose up -d --scale moderation-worker=5
 ```
 
-Set `WORKER_CONCURRENCY` above `1` to add independent AMQP consumers inside each replica. Start conservatively and increase only while Jev latency/rate limits remain healthy. Each consumer uses RabbitMQ prefetch `1`, so it does not reserve more work than it can process.
+`WORKER_CONCURRENCY` controls consumers per worker container. Each consumer holds
+its current job during retry backoff; capacity is deliberately bounded. Tune
+concurrency against provider limits. Broker persistence is not a substitute for
+replication and backups.
 
-## RabbitMQ: primary application integration
+## Development
 
-Publish a persistent JSON request to the durable `moderation.requests` queue. This is the recommended path for apps that do not need the decision inline with a browser request.
-
-```json
-{
-  "id": "post-123",
-  "text": "Example text to assess",
-  "metadata": { "app": "social-web", "user_id": "user-42" }
-}
-```
-
-Set AMQP properties on the published message:
-
-- `correlation_id`: your application's request/job ID.
-- `reply_to`: a durable, app-owned queue such as `social-web.moderation.results`.
-- `delivery_mode`: persistent.
-
-The service sends the result to `reply_to` and preserves `correlation_id`. Thus every integrating app receives only its own moderation results. If `reply_to` is omitted, results go to the fallback `moderation.results` queue.
-
-The worker acknowledges a request only after it publishes a result. A temporary Jev or broker failure causes the message to be requeued for retry.
-
-## HTTP: health and optional synchronous use
+Go 1.24+ and RabbitMQ (only for integration tests):
 
 ```sh
-curl -sS http://localhost:8080/v1/moderate \
-  -H 'Content-Type: application/json' \
-  -d '{"id":"post-123","text":"Example text to assess","type":"noul"}'
+make check
+make build
+TEST_AMQP_URL=amqp://guest:guest@localhost:5672/ go test -race ./...
 ```
 
-`GET /v1/policy` returns the active configuration and `GET /healthz` is the health check.
+Unit tests use a fake provider and need no API key. CI also runs real broker
+integration tests. [CONTRIBUTING.md](CONTRIBUTING.md) describes contributions.
 
-## Configure classes
-
-Edit `config/policy.json`; it is reloaded for each item, so no restart is required. Every request must provide a `type` of `noul`, `choice`, or `score`. The service runs only classes with that type. Every class has an `id`, a plain-language `definition`, an action, and one of:
-
-| Type | Use | Required controls |
-| --- | --- | --- |
-| `noul` | Independent category: a text may match many classes. | `review_threshold`, `action_threshold` |
-| `choice` | One mutually-exclusive category. | `criteria` map; optional `choice_actions` and `min_confidence` |
-| `score` | Ordered severity. | ordered `criteria`, `review_score`, `action_score` |
-
-Actions are `allow`, `review`, and `block`; `actions_precedence` decides which result wins when classes disagree. Add `choice_actions`, for example `{"spam":"review","abuse":"block"}`, to make a Choice result affect moderation.
-
-## Edge-case evaluation
-
-`testdata/edge_cases.json` has 50 labeled boundary cases: 17 Noul, 17 Choice, and 16 Score. Run them against Jev after setting `TYPESAFE_API_KEY`:
+The 50 labeled cases in `testdata/edge_cases.json` are live evaluations:
 
 ```sh
-docker run --rm --env-file .env -v "$PWD:/src" -w /src \
-  golang:1.24-alpine go run ./cmd/edge-test
+go run ./cmd/edge-test
 ```
 
-Each JSON output row gives the expected label, Jev's returned label/rounded score, the final action, and whether they match. These are evaluation cases, not a deterministic unit test: review misses, then tune the definitions and thresholds in `config/policy.json`.
+They incur provider usage and measure agreement with labels, not a production
+accuracy guarantee. Historical [load-test results](docs/LOAD_TEST_RESULTS.md)
+are retained for context; rerun after changing policy or concurrency.
 
-## Security
+## Configuration
 
-Keep `TYPESAFE_API_KEY` in `.env` or your deployment secret manager only. Do not put it in policy, source code, Docker images, or messages. The key previously shared in chat should be rotated before production use.
+See [.env.example](.env.example). The service reads environment variables;
+Docker Compose loads `.env`, while `go run` expects exported variables.
+No API key or submitted text is intentionally logged. Application owners are
+responsible for access control, retention of metadata/results, human review,
+and enforcing decisions in their own product.
