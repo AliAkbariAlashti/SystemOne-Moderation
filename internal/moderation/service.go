@@ -38,7 +38,7 @@ func (s *Service) Moderate(ctx context.Context, input Request) (Result, error) {
 	for _, class := range policy.Classes {
 		answer, ok := response.Answers[class.ID]
 		if !ok {
-			return Result{}, fmt.Errorf("Jev response omitted class %q", class.ID)
+			return Result{}, &ProviderResponseError{}
 		}
 		if err := answer.validate(class); err != nil {
 			return Result{}, err

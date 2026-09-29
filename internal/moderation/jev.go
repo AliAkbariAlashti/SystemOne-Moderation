@@ -7,7 +7,9 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
+	"strconv"
 	"time"
 )
 
@@ -75,7 +77,7 @@ func (c *Client) Evaluate(ctx context.Context, policy Policy, text string) (jevR
 	}
 	var result jevResponse
 	if err := json.Unmarshal(responseBody, &result); err != nil {
-		return jevResponse{}, fmt.Errorf("decode Jev response: %w", err)
+		return jevResponse{}, &ProviderResponseError{}
 	}
 	return result, nil
 }
@@ -86,9 +88,21 @@ type UpstreamError struct{ Status int }
 func (e *UpstreamError) Error() string {
 	return fmt.Sprintf("moderation provider returned HTTP %d", e.Status)
 }
+
+// ProviderResponseError means Jev returned a successful HTTP response that did
+// not satisfy its answer contract. Retrying the same malformed response only
+// spends provider capacity and delays dead-letter handling.
+type ProviderResponseError struct{}
+
+func (*ProviderResponseError) Error() string { return "invalid response from moderation provider" }
+
 func Retryable(err error) bool {
 	var invalid *ValidationError
 	if errors.As(err, &invalid) {
+		return false
+	}
+	var response *ProviderResponseError
+	if errors.As(err, &response) {
 		return false
 	}
 	var upstream *UpstreamError
@@ -98,8 +112,8 @@ func Retryable(err error) bool {
 	return !errors.Is(err, context.Canceled)
 }
 func (a answer) validate(c Class) error {
-	bad := func() error { return fmt.Errorf("invalid provider answer for class %q", c.ID) }
-	if a.Type != "" && a.Type != c.Type {
+	bad := func() error { return &ProviderResponseError{} }
+	if a.Type != c.Type {
 		return bad()
 	}
 	switch c.Type {
@@ -109,19 +123,56 @@ func (a answer) validate(c Class) error {
 		}
 	case "choice":
 		var criteria map[string]string
-		_ = json.Unmarshal(c.Criteria, &criteria)
+		if json.Unmarshal(c.Criteria, &criteria) != nil {
+			return bad()
+		}
 		if _, ok := criteria[a.Choice]; !ok {
 			return bad()
 		}
 		if a.Confidence == nil || !inRange(*a.Confidence, 0, 1) {
 			return bad()
 		}
+		if !validDistribution(a.Probabilities, choiceKeys(criteria)) {
+			return bad()
+		}
 	case "score":
 		var criteria []string
-		_ = json.Unmarshal(c.Criteria, &criteria)
+		if json.Unmarshal(c.Criteria, &criteria) != nil {
+			return bad()
+		}
 		if a.Score == nil || !inRange(*a.Score, 0, float64(len(criteria)-1)) || a.Confidence == nil || !inRange(*a.Confidence, 0, 1) {
+			return bad()
+		}
+		keys := make([]string, len(criteria))
+		for i := range criteria {
+			keys[i] = strconv.Itoa(i)
+		}
+		if !validDistribution(a.Probabilities, keys) {
 			return bad()
 		}
 	}
 	return nil
+}
+
+func choiceKeys(criteria map[string]string) []string {
+	keys := make([]string, 0, len(criteria))
+	for key := range criteria {
+		keys = append(keys, key)
+	}
+	return keys
+}
+
+func validDistribution(probabilities map[string]float64, expected []string) bool {
+	if len(probabilities) != len(expected) {
+		return false
+	}
+	var total float64
+	for _, key := range expected {
+		value, ok := probabilities[key]
+		if !ok || !inRange(value, 0, 1) {
+			return false
+		}
+		total += value
+	}
+	return math.Abs(total-1) <= 1e-6
 }
